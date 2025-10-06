@@ -326,30 +326,6 @@ class QwenDoubleStreamAttnProcessor2_0:
         joint_query = torch.cat([txt_query, img_query], dim=1)
         joint_key = torch.cat([txt_key, img_key], dim=1)
         joint_value = torch.cat([txt_value, img_value], dim=1)
-        
-        # CONTEXT PARALLEL FIX for Qwen: Gather K,V from all GPUs after concatenation
-        # This ensures each GPU's queries attend to ALL key-value pairs
-        if torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:
-            world_size = torch.distributed.get_world_size()
-            
-            # Check if we're in context parallel mode by checking tensor shapes
-            # Skip gathering if sequence length is too small (might be batch or head dim)
-            seq_len = joint_key.shape[1]  # Shape is [B, S, H, D] after unflatten
-            
-            # Only gather if sequence looks split (each GPU should have a fraction of full seq)
-            # For Qwen, check if sequence is reasonably large
-            if seq_len > 100:  # Reasonable threshold to avoid gathering on wrong dimension
-                # Gather keys and values from all ranks 
-                key_list = [torch.empty_like(joint_key) for _ in range(world_size)]
-                value_list = [torch.empty_like(joint_value) for _ in range(world_size)]
-                
-                torch.distributed.all_gather(key_list, joint_key.contiguous())
-                torch.distributed.all_gather(value_list, joint_value.contiguous())
-                
-                # Concatenate along sequence dimension (dim=1 for [B, S, H, D])
-                joint_key = torch.cat(key_list, dim=1)
-                joint_value = torch.cat(value_list, dim=1)
-
         # Compute joint attention
         joint_hidden_states = dispatch_attention_fn(
             joint_query,

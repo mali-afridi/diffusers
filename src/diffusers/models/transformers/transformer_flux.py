@@ -114,33 +114,27 @@ class FluxAttnProcessor:
         if image_rotary_emb is not None:
             query = apply_rotary_emb(query, image_rotary_emb, sequence_dim=1)
             key = apply_rotary_emb(key, image_rotary_emb, sequence_dim=1)
-        
-        # CONTEXT PARALLEL FIX for Flux: Gather K,V from all GPUs after rotary
-        # This ensures each GPU's queries attend to ALL key-value pairs
-        if torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:
+
+        if (
+            torch.distributed.is_initialized()
+            and torch.distributed.get_world_size() > 1
+            and not attn.training
+            and self._parallel_config is not None
+            and (
+                self._parallel_config.context_parallel_config.ring_degree > 1 
+                or self._parallel_config.context_parallel_config.ulysses_degree > 1
+            )
+        ):
             world_size = torch.distributed.get_world_size()
-            
-            # Check if we're in context parallel mode by checking tensor shapes
-            # In context parallel, sequences are split so each GPU has a fraction
-            # Skip gathering if sequence length is too small (might be batch or head dim)
-            seq_len = key.shape[1]  # Shape is [B, S, H, D] after unflatten
-            
-            # Only gather if sequence looks split (each GPU should have ~1/world_size of full seq)
-            # For Flux, typical full sequence is 4608, so split would be 2304 per GPU with 2 GPUs
-            if seq_len > 100:  # Reasonable threshold to avoid gathering on wrong dimension
-                # Gather keys and values from all ranks 
+
+            seq_len = key.shape[1]
+            if seq_len > 100:
                 key_list = [torch.empty_like(key) for _ in range(world_size)]
                 value_list = [torch.empty_like(value) for _ in range(world_size)]
-                
                 torch.distributed.all_gather(key_list, key.contiguous())
                 torch.distributed.all_gather(value_list, value.contiguous())
-                
-                # Concatenate along sequence dimension (dim=1 for [B, S, H, D])
                 key = torch.cat(key_list, dim=1)
                 value = torch.cat(value_list, dim=1)
-
-        # print(f"Rank {torch.distributed.get_rank()}: Query shape: {query.shape}, Key shape: {key.shape}, Value shape: {value.shape}")
-        
         hidden_states = dispatch_attention_fn(
             query,
             key,
